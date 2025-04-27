@@ -15,7 +15,7 @@ intents.messages = True
 intents.message_content = True  
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Stocker les parties 
+# Stocker les parties
 parties = {}
 
 # Configuration des modes
@@ -58,11 +58,17 @@ async def temps_limite(interaction, nombre_secret, temps):
 async def start(interaction: discord.Interaction, mode: str = "normal", min_val: int = None, max_val: int = None, temps: int = None):
     """Démarrer une partie avec un mode de difficulté ou personnalisé."""
     
-    # Vérifier si l'interaction provient d'un serveur (guild)
-    if interaction.guild is None:
-        await interaction.response.send_message("❌ Cette commande ne peut être utilisée que dans un serveur.")
-        return
-    
+    # Vérifier si l'interaction provient d'un serveur (guild) ou d'un DM
+    if interaction.guild is None:  # Message privé
+        user_id = interaction.user.id
+        if user_id in parties:
+            await interaction.response.send_message("⚠️ Une partie est déjà en cours ! Utilise `/stop` pour l'arrêter.")
+            return
+    else:  # Serveur
+        if interaction.guild.id in parties:
+            await interaction.response.send_message("⚠️ Une partie est déjà en cours ! Utilise `/stop` pour l'arrêter.")
+            return
+
     mode = mode.lower()
 
     if mode == "custom":
@@ -78,65 +84,90 @@ async def start(interaction: discord.Interaction, mode: str = "normal", min_val:
         borne_min, borne_max = config["range"]
         temps = config["time"]
 
-    if interaction.guild.id in parties:
-        await interaction.response.send_message("⚠️ Une partie est déjà en cours ! Utilise `/stop` pour l'arrêter.")
-        return
-
     nombre_secret = random.randint(borne_min, borne_max)
     await interaction.response.send_message(f"🎮 Mode **{mode.capitalize()}** lancé ! Devinez un nombre entre **{borne_min}** et **{borne_max}**.\n⏳ Vous avez **{temps} secondes** !")
 
     task = asyncio.create_task(temps_limite(interaction, nombre_secret, temps))
     start_time = asyncio.get_event_loop().time()
-    parties[interaction.guild.id] = (nombre_secret, interaction.user.id, task, borne_min, borne_max, temps, start_time)
 
-@bot.tree.command(name="stop", description="Arrêter la partie en cours.")
-async def stop(interaction: discord.Interaction):
-    """Arrêter la partie en cours."""
-    if interaction.guild.id in parties:
-        _, _, task, _, _, _, _ = parties[interaction.guild.id]
-        task.cancel()
-        del parties[interaction.guild.id]
-        await interaction.response.send_message("🛑 Partie arrêtée.")
-    else:
-        await interaction.response.send_message("❌ Il n'y a pas de partie en cours.")
+    # Enregistrer la partie dans le bon espace de stockage
+    if interaction.guild is None:  # En DM
+        parties[interaction.user.id] = (nombre_secret, interaction.user.id, task, borne_min, borne_max, temps, start_time)
+    else:  # En serveur
+        parties[interaction.guild.id] = (nombre_secret, interaction.user.id, task, borne_min, borne_max, temps, start_time)
 
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
+    if message.author.bot:
         return
 
-    if message.guild.id in parties:
-        nombre_secret, joueur_id, task, borne_min, borne_max, temps, start_time = parties[message.guild.id]
+    # Vérifier si le message vient d'un serveur (guild) ou d'un DM
+    if message.guild is None:  # C'est un message privé (DM)
+        if message.author.id in parties:  # Si un jeu est en cours en DM
+            nombre_secret, joueur_id, task, borne_min, borne_max, temps, start_time = parties[message.author.id]
 
-        try:
-            guess = int(message.content)
+            try:
+                guess = int(message.content)
 
-            if guess < borne_min or guess > borne_max:
-                await message.channel.send(f"{message.author.mention}, ton nombre doit être entre {borne_min} et {borne_max} ! 🔢")
-            elif guess < nombre_secret:
-                await message.channel.send(f"{message.author.mention} Trop petit ! 📉")
-            elif guess > nombre_secret:
-                await message.channel.send(f"{message.author.mention} Trop grand ! 📈")
-            else:
-                end_time = asyncio.get_event_loop().time()
-                elapsed_time = int(end_time - start_time)
+                if guess < borne_min or guess > borne_max:
+                    await message.channel.send(f"{message.author.mention}, ton nombre doit être entre {borne_min} et {borne_max} ! 🔢")
+                elif guess < nombre_secret:
+                    await message.channel.send(f"{message.author.mention} Trop petit ! 📉")
+                elif guess > nombre_secret:
+                    await message.channel.send(f"{message.author.mention} Trop grand ! 📈")
+                else:
+                    end_time = asyncio.get_event_loop().time()
+                    elapsed_time = int(end_time - start_time)
 
-                await message.channel.send(f"🎉 Bravo {message.author.mention} ! Tu as trouvé le nombre **{nombre_secret}** en **{elapsed_time} secondes** !")
+                    await message.channel.send(f"🎉 Bravo {message.author.mention} ! Tu as trouvé le nombre **{nombre_secret}** en **{elapsed_time} secondes** !")
 
-                # Mettre à jour le leaderboard
-                user_id = str(message.author.id)
-                if user_id not in game_leaderboard:
-                    game_leaderboard[user_id] = {"wins": 0, "fastest": elapsed_time}
-                game_leaderboard[user_id]["wins"] += 1
-                if elapsed_time < game_leaderboard[user_id]["fastest"]:
-                    game_leaderboard[user_id]["fastest"] = elapsed_time
-                save_leaderboard()
+                    # Mettre à jour le leaderboard
+                    user_id = str(message.author.id)
+                    if user_id not in game_leaderboard:
+                        game_leaderboard[user_id] = {"wins": 0, "fastest": elapsed_time}
+                    game_leaderboard[user_id]["wins"] += 1
+                    if elapsed_time < game_leaderboard[user_id]["fastest"]:
+                        game_leaderboard[user_id]["fastest"] = elapsed_time
+                    save_leaderboard()
 
-                task.cancel()
-                del parties[message.guild.id]
+                    task.cancel()
+                    del parties[message.author.id]  # Utilisation de l'ID de l'utilisateur pour les parties en DM
 
-        except ValueError:
-            pass
+            except ValueError:
+                pass
+    else:  # Message provenant d'un serveur (guild)
+        if message.guild.id in parties:  # Si une partie est en cours dans un serveur
+            nombre_secret, joueur_id, task, borne_min, borne_max, temps, start_time = parties[message.guild.id]
+
+            try:
+                guess = int(message.content)
+
+                if guess < borne_min or guess > borne_max:
+                    await message.channel.send(f"{message.author.mention}, ton nombre doit être entre {borne_min} et {borne_max} ! 🔢")
+                elif guess < nombre_secret:
+                    await message.channel.send(f"{message.author.mention} Trop petit ! 📉")
+                elif guess > nombre_secret:
+                    await message.channel.send(f"{message.author.mention} Trop grand ! 📈")
+                else:
+                    end_time = asyncio.get_event_loop().time()
+                    elapsed_time = int(end_time - start_time)
+
+                    await message.channel.send(f"🎉 Bravo {message.author.mention} ! Tu as trouvé le nombre **{nombre_secret}** en **{elapsed_time} secondes** !")
+
+                    # Mettre à jour le leaderboard
+                    user_id = str(message.author.id)
+                    if user_id not in game_leaderboard:
+                        game_leaderboard[user_id] = {"wins": 0, "fastest": elapsed_time}
+                    game_leaderboard[user_id]["wins"] += 1
+                    if elapsed_time < game_leaderboard[user_id]["fastest"]:
+                        game_leaderboard[user_id]["fastest"] = elapsed_time
+                    save_leaderboard()
+
+                    task.cancel()
+                    del parties[message.guild.id]  # Utilisation de l'ID de la guilde pour les parties en serveur
+
+            except ValueError:
+                pass
 
 @bot.tree.command(name="leaderboard", description="Afficher le classement.")
 async def leaderboard(interaction: discord.Interaction):
